@@ -132,13 +132,32 @@ public final class InstagramBridge {
                 if (first != null) headerClass = first.getClass();
             }
             if (uriStr != null && uriStr.contains("instagram.com/api/v1/")) {
-                capturedPolicy = policy;
+                boolean isFeed = uriStr.contains("/feed/timeline");
+                boolean hasCacheKey = hasNonNullPublicString(policy);
+                if (capturedPolicy == null || (!isFeed && !hasCacheKey)) {
+                    capturedPolicy = policy;
+                }
                 if (methodInt != null) {
                     if (bodyObj == null && capturedMethodGet == null) capturedMethodGet = methodInt;
                     if (bodyObj != null && capturedMethodPost == null) capturedMethodPost = methodInt;
                 }
             }
         } catch (Throwable ignored) {}
+    }
+
+    private static boolean hasNonNullPublicString(Object o) {
+        for (java.lang.reflect.Field f : o.getClass().getDeclaredFields()) {
+            int mod = f.getModifiers();
+            if (!java.lang.reflect.Modifier.isStatic(mod)
+                    && !java.lang.reflect.Modifier.isFinal(mod)
+                    && f.getType() == String.class) {
+                try {
+                    f.setAccessible(true);
+                    if (f.get(o) != null) return true;
+                } catch (Throwable ignored) {}
+            }
+        }
+        return false;
     }
 
     private static boolean hasUriField(Object o) {
