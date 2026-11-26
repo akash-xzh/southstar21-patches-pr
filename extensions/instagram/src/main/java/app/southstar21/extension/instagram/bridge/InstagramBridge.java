@@ -710,7 +710,8 @@ public final class InstagramBridge {
                 && capturedPolicy != null && headerClass != null) {
             try {
                 HttpResult nr = nativeRequest(auth, method, urlStr, form);
-                if (nr != null) return nr;
+                if (nr != null && nr.body != null && !nr.body.isEmpty()) return nr;
+                Log.w(TAG, "Native SyncHttpService returned empty body, falling back to HttpURLConnection");
             } catch (Throwable ex) {
                 Log.w(TAG, "Native SyncHttpService fallback to HttpURLConnection: " + ex.getMessage());
             }
@@ -905,7 +906,9 @@ public final class InstagramBridge {
         HttpResult out = new HttpResult();
         out.code = statusCode > 0 ? statusCode : 200;
         out.body = bodyStr;
-        Log.i(TAG, "native " + method + " " + urlStr + " -> " + out.code + " len=" + bodyStr.length()
+        Log.i(TAG, "native " + method + " " + urlStr + " -> " + out.code
+                + " bodyObj=" + (respBody != null ? respBody.getClass().getName() : "null")
+                + " len=" + bodyStr.length()
                 + " head=" + truncate(bodyStr, 120).replace('\n', ' '));
         return out;
     }
