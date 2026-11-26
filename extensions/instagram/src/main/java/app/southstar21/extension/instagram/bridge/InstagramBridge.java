@@ -677,11 +677,12 @@ public final class InstagramBridge {
                 }
             }
         }
-        boolean persisted = checked && (wantLike ? hasLiked : !hasLiked);
+        boolean persisted = checked ? (wantLike ? hasLiked : !hasLiked) : true;
         return new JSONObject()
                 .put("ok", persisted)
                 .put("verified", persisted)
                 .put("reverted", wantLike && checked && !hasLiked)
+                .put("checked", checked)
                 .put("has_liked", hasLiked)
                 .put("media_id", mediaId)
                 .put("shortcode", shortcode)
@@ -730,16 +731,6 @@ public final class InstagramBridge {
 
     private static HttpResult request(AuthInfo auth, String method, String urlStr, Map<String, String> form)
             throws Exception {
-        if (syncSendMethod != null && syncReqClass != null && igReqClass != null
-                && capturedPolicy != null && headerClass != null) {
-            try {
-                HttpResult nr = nativeRequest(auth, method, urlStr, form);
-                if (nr != null && nr.body != null && !nr.body.isEmpty()) return nr;
-                Log.w(TAG, "Native SyncHttpService returned empty body, falling back to HttpURLConnection");
-            } catch (Throwable ex) {
-                Log.w(TAG, "Native SyncHttpService fallback to HttpURLConnection: " + ex.getMessage());
-            }
-        }
         HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
         conn.setRequestMethod(method);
         conn.setConnectTimeout(15000);
