@@ -844,7 +844,11 @@ public final class InstagramBridge {
             f.setAccessible(true);
             if (f.getType() == int.class) {
                 int v = f.getInt(resp);
-                if (v >= 100 && v <= 599 && statusCode == 0) statusCode = v;
+                if ("A02".equals(f.getName())) {
+                    statusCode = v;
+                } else if (statusCode == 0 && v >= 100 && v <= 599) {
+                    statusCode = v;
+                }
             } else if (f.getType().isInterface() && hasInputStreamMethod(f.getType())) {
                 respBody = f.get(resp);
             }
@@ -865,7 +869,16 @@ public final class InstagramBridge {
                         byte[] buf = new byte[8192];
                         int n;
                         while ((n = is.read(buf)) > 0) baos.write(buf, 0, n);
-                        bodyStr = new String(baos.toByteArray(), StandardCharsets.UTF_8);
+                        byte[] rawBytes = baos.toByteArray();
+                        if (rawBytes.length >= 2 && rawBytes[0] == (byte) 0x1f && rawBytes[1] == (byte) 0x8b) {
+                            try (java.util.zip.GZIPInputStream gis =
+                                         new java.util.zip.GZIPInputStream(new java.io.ByteArrayInputStream(rawBytes))) {
+                                ByteArrayOutputStream ungzip = new ByteArrayOutputStream();
+                                while ((n = gis.read(buf)) > 0) ungzip.write(buf, 0, n);
+                                rawBytes = ungzip.toByteArray();
+                            }
+                        }
+                        bodyStr = new String(rawBytes, StandardCharsets.UTF_8);
                     }
                 }
             }
@@ -873,6 +886,7 @@ public final class InstagramBridge {
         HttpResult out = new HttpResult();
         out.code = statusCode > 0 ? statusCode : 200;
         out.body = bodyStr;
+        Log.i(TAG, "native " + method + " " + urlStr + " -> " + out.code + " len=" + bodyStr.length());
         return out;
     }
 
