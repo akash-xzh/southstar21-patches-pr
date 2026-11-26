@@ -35,7 +35,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @SuppressWarnings("unused")
 public final class InstagramBridge {
     private static final String TAG = "InstagramBridge";
-    private static final int PORT = 48913;
+    private static final int[] PORTS_MAIN = {48913, 48915, 48917, 48919};
+    private static final int[] PORTS_CLONE = {48915, 48917, 48919, 48913};
     private static final String IG_API = "https://i.instagram.com/api/v1";
     private static final String IG_APP_ID = "567067343352427";
     private static final String SHORTCODE_ALPHABET =
@@ -43,6 +44,8 @@ public final class InstagramBridge {
 
     private static final AtomicBoolean STARTED = new AtomicBoolean(false);
     private static final ExecutorService EXEC = Executors.newCachedThreadPool();
+    private static volatile int boundPort = 48913;
+    private static volatile int androidUserId = 0;
     private static volatile Context appContext;
     private static volatile String capturedBearer;
     private static volatile String capturedMid;
@@ -228,12 +231,27 @@ public final class InstagramBridge {
     }
 
     private static void startServer() {
+        androidUserId = android.os.Process.myUid() / 100000;
         if (!STARTED.compareAndSet(false, true)) return;
         Thread t = new Thread(() -> {
-            try (ServerSocket server = new ServerSocket(PORT, 16, InetAddress.getByName("127.0.0.1"))) {
-                Log.i(TAG, "Listening on 127.0.0.1:" + PORT);
+            int[] candidates = androidUserId == 0 ? PORTS_MAIN : PORTS_CLONE;
+            ServerSocket server = null;
+            for (int p : candidates) {
+                try {
+                    server = new ServerSocket(p, 16, InetAddress.getByName("127.0.0.1"));
+                    boundPort = p;
+                    break;
+                } catch (Throwable ignored) {}
+            }
+            if (server == null) {
+                STARTED.set(false);
+                Log.e(TAG, "No free port available");
+                return;
+            }
+            try (ServerSocket s = server) {
+                Log.i(TAG, "Listening on 127.0.0.1:" + boundPort + " (user=" + androidUserId + ")");
                 while (true) {
-                    Socket client = server.accept();
+                    Socket client = s.accept();
                     EXEC.submit(() -> handleClient(client));
                 }
             } catch (Throwable ex) {
@@ -266,7 +284,13 @@ public final class InstagramBridge {
             int httpStatus = 200;
             try {
                 if ("/ping".equals(path)) {
-                    respJson = new JSONObject().put("ok", true).put("bridge", "instagram");
+                    AuthInfo a = findAuth();
+                    respJson = new JSONObject()
+                            .put("ok", true)
+                            .put("bridge", "instagram")
+                            .put("android_user", androidUserId)
+                            .put("port", boundPort)
+                            .put("my_uid", a != null ? a.myUid : "");
                 } else if ("/auth_check".equals(path)) {
                     respJson = handleAuthCheck();
                 } else if ("/self_check".equals(path)) {
