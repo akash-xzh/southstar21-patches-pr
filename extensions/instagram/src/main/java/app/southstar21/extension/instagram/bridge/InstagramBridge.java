@@ -45,8 +45,18 @@ public final class InstagramBridge {
     private static final ExecutorService EXEC = Executors.newCachedThreadPool();
     private static volatile Context appContext;
     private static volatile String capturedBearer;
+    private static volatile String capturedMid;
 
     private InstagramBridge() {}
+
+    public static void captureHeader(String name, String value) {
+        if (name == null || value == null || value.isEmpty()) return;
+        if ("Authorization".equalsIgnoreCase(name)) {
+            captureToken(value);
+        } else if ("X-MID".equalsIgnoreCase(name)) {
+            capturedMid = value;
+        }
+    }
 
     public static void captureToken(String token) {
         if (token != null && token.startsWith("Bearer IGT:2:") && token.length() > 20) {
@@ -469,6 +479,9 @@ public final class InstagramBridge {
         conn.setConnectTimeout(15000);
         conn.setReadTimeout(15000);
         conn.setRequestProperty("Authorization", auth.bearer);
+        if (capturedMid != null && !capturedMid.isEmpty()) {
+            conn.setRequestProperty("X-MID", capturedMid);
+        }
         conn.setRequestProperty("User-Agent", userAgent());
         conn.setRequestProperty("X-IG-App-ID", IG_APP_ID);
         conn.setRequestProperty("X-IG-Connection-Type", "WIFI");
