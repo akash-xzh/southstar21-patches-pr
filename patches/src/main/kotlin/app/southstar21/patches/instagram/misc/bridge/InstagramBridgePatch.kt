@@ -21,6 +21,10 @@ internal object CapabilitiesHeaderCallerFingerprint : Fingerprint(
     strings = listOf("X-IG-Capabilities", "3brTv10C"),
 )
 
+internal object SyncHttpServiceFingerprint : Fingerprint(
+    strings = listOf("SyncHttpService.sendRequest"),
+)
+
 @Suppress("unused")
 val instagramBridgePatch = bytecodePatch(
     name = "Instagram bridge (localhost)",
@@ -30,10 +34,35 @@ val instagramBridgePatch = bytecodePatch(
     dependsOn(sharedExtensionPatch)
 
     execute {
+        val syncMethod = SyncHttpServiceFingerprint.method
+        syncMethod.addInstruction(
+            0,
+            "invoke-static { p0 }, $BRIDGE_CLASS->captureSyncRequest(Ljava/lang/Object;)V",
+        )
+        val startRequestRef = syncMethod.instructions
+            .asSequence()
+            .filter { it.opcode == Opcode.INVOKE_VIRTUAL }
+            .mapNotNull { (it as? ReferenceInstruction)?.reference as? MethodReference }
+            .firstOrNull { it.name == "startRequest" && it.parameterTypes.size == 3 }
+
+        if (startRequestRef != null) {
+            val httpServiceClass = mutableClassDefBy(startRequestRef.definingClass)
+            val startReqMethod = httpServiceClass.methods.first {
+                it.name == startRequestRef.name &&
+                    it.parameterTypes == startRequestRef.parameterTypes &&
+                    it.returnType == startRequestRef.returnType
+            }
+            startReqMethod.addInstruction(
+                0,
+                "invoke-static { p1, p2 }, $BRIDGE_CLASS->captureNativeRequest(Ljava/lang/Object;Ljava/lang/Object;)V",
+            )
+        }
+
         MainActivityWindowFocusFingerprint.method.addInstruction(
             0,
             "invoke-static { p0 }, $BRIDGE_CLASS->install(Landroid/app/Activity;)V",
         )
+
 
         val caller = HeaderAttachCallerFingerprint.method
         val headerHelperRef = caller.instructions

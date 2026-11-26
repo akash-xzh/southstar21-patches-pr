@@ -49,7 +49,115 @@ public final class InstagramBridge {
     private static final java.util.concurrent.ConcurrentHashMap<String, String> capturedHeaders =
             new java.util.concurrent.ConcurrentHashMap<>();
 
+    // Native Instagram SyncHttpService + Tigon state
+    private static volatile java.lang.reflect.Method syncSendMethod;
+    private static volatile Class<?> syncReqClass;
+    private static volatile Class<?> igReqClass;
+    private static volatile Class<?> headerClass;
+    private static volatile Object capturedPolicy;
+    private static volatile Integer capturedMethodGet;
+    private static volatile Integer capturedMethodPost;
+
     private InstagramBridge() {}
+
+    public static void captureSyncRequest(Object syncReq) {
+        if (syncReq == null) return;
+        try {
+            if (syncSendMethod == null) {
+                Class<?> reqCls = syncReq.getClass();
+                syncReqClass = reqCls;
+                StackTraceElement[] st = Thread.currentThread().getStackTrace();
+                for (int i = 0; i < st.length; i++) {
+                    if (InstagramBridge.class.getName().equals(st[i].getClassName())
+                            && "captureSyncRequest".equals(st[i].getMethodName())
+                            && i + 1 < st.length) {
+                        Class<?> syncCls = Class.forName(st[i + 1].getClassName(), false, reqCls.getClassLoader());
+                        for (java.lang.reflect.Method m : syncCls.getDeclaredMethods()) {
+                            if (java.lang.reflect.Modifier.isStatic(m.getModifiers())
+                                    && m.getParameterTypes().length == 1
+                                    && m.getParameterTypes()[0] == reqCls) {
+                                m.setAccessible(true);
+                                syncSendMethod = m;
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            Object igReq = null;
+            Object policy = null;
+            for (java.lang.reflect.Field f : syncReq.getClass().getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                f.setAccessible(true);
+                Object v = f.get(syncReq);
+                if (v == null) continue;
+                String fn = f.getType().getName();
+                if (fn.startsWith("java.") || fn.equals("boolean")) continue;
+                if (hasUriField(v)) igReq = v;
+                else if (hasStringField(v, "i.instagram.com") || v.getClass().getDeclaredFields().length > 10) policy = v;
+            }
+            if (igReq != null && policy != null) {
+                captureNativeRequest(igReq, policy);
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    public static void captureNativeRequest(Object igReq, Object policy) {
+        if (igReq == null || policy == null) return;
+        try {
+            if (capturedPolicy == null) capturedPolicy = policy;
+            if (igReqClass == null) igReqClass = igReq.getClass();
+            String uriStr = null;
+            Integer methodInt = null;
+            Object bodyObj = null;
+            java.util.List<?> hdrs = null;
+            for (java.lang.reflect.Field f : igReq.getClass().getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                f.setAccessible(true);
+                Object v = f.get(igReq);
+                if (v == null) continue;
+                if (v instanceof java.net.URI && uriStr == null) {
+                    uriStr = v.toString();
+                } else if (v instanceof Integer && methodInt == null && !java.lang.reflect.Modifier.isPublic(f.getModifiers()) == false) {
+                    if (java.lang.reflect.Modifier.isFinal(f.getModifiers())) methodInt = (Integer) v;
+                } else if (v instanceof java.util.List) {
+                    hdrs = (java.util.List<?>) v;
+                } else if (f.getType().isInterface() && hasInputStreamMethod(f.getType())) {
+                    bodyObj = v;
+                }
+            }
+            if (hdrs != null && !hdrs.isEmpty() && headerClass == null) {
+                Object first = hdrs.get(0);
+                if (first != null) headerClass = first.getClass();
+            }
+            if (uriStr != null && uriStr.contains("instagram.com/api/v1/")) {
+                capturedPolicy = policy;
+                if (methodInt != null) {
+                    if (bodyObj == null && capturedMethodGet == null) capturedMethodGet = methodInt;
+                    if (bodyObj != null && capturedMethodPost == null) capturedMethodPost = methodInt;
+                }
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private static boolean hasUriField(Object o) {
+        for (java.lang.reflect.Field f : o.getClass().getDeclaredFields()) {
+            if (f.getType() == java.net.URI.class) return true;
+        }
+        return false;
+    }
+
+    private static boolean hasStringField(Object o, String sub) {
+        return false;
+    }
+
+    private static boolean hasInputStreamMethod(Class<?> cls) {
+        for (java.lang.reflect.Method m : cls.getMethods()) {
+            if (m.getParameterTypes().length == 0 && m.getReturnType() == InputStream.class) return true;
+        }
+        return false;
+    }
 
     public static void captureHeader(String name, String value) {
         if (name == null || value == null || value.isEmpty()) return;
@@ -303,11 +411,16 @@ public final class InstagramBridge {
         String masked = auth.bearer.length() > 24
                 ? auth.bearer.substring(0, 20) + "..."
                 : "***";
+        boolean nativeReady = syncSendMethod != null && syncReqClass != null
+                && igReqClass != null && capturedPolicy != null && headerClass != null;
         return new JSONObject()
                 .put("ok", true)
                 .put("pref_file", auth.prefFile)
                 .put("my_uid", auth.myUid)
                 .put("token_prefix", masked)
+                .put("transport", nativeReady ? "native_tigon" : "httpurlconnection_fallback")
+                .put("has_get", capturedMethodGet != null)
+                .put("has_post", capturedMethodPost != null)
                 .put("captured_headers", capturedHeaders.size())
                 .put("ua", capturedHeaders.getOrDefault("User-Agent", userAgent()));
     }
@@ -574,6 +687,15 @@ public final class InstagramBridge {
 
     private static HttpResult request(AuthInfo auth, String method, String urlStr, Map<String, String> form)
             throws Exception {
+        if (syncSendMethod != null && syncReqClass != null && igReqClass != null
+                && capturedPolicy != null && headerClass != null) {
+            try {
+                HttpResult nr = nativeRequest(auth, method, urlStr, form);
+                if (nr != null) return nr;
+            } catch (Throwable ex) {
+                Log.w(TAG, "Native SyncHttpService fallback to HttpURLConnection: " + ex.getMessage());
+            }
+        }
         HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
         conn.setRequestMethod(method);
         conn.setConnectTimeout(15000);
@@ -623,6 +745,135 @@ public final class InstagramBridge {
         res.code = code;
         res.body = body;
         return res;
+    }
+
+    private static Object newHeader(String name, String value) throws Exception {
+        Object h = headerClass.getDeclaredConstructor().newInstance();
+        int strIdx = 0;
+        for (java.lang.reflect.Field f : headerClass.getDeclaredFields()) {
+            if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+            if (f.getType() == String.class) {
+                f.setAccessible(true);
+                if (strIdx == 0) f.set(h, name);
+                else if (strIdx == 1) f.set(h, value);
+                strIdx++;
+            }
+        }
+        return h;
+    }
+
+    private static HttpResult nativeRequest(AuthInfo auth, String method, String urlStr, Map<String, String> form)
+            throws Exception {
+        boolean isPost = "POST".equalsIgnoreCase(method);
+        Integer methodInt = isPost
+                ? (capturedMethodPost != null ? capturedMethodPost : Integer.valueOf(1))
+                : (capturedMethodGet != null ? capturedMethodGet : Integer.valueOf(2));
+
+        java.lang.reflect.Constructor<?> igCtor = null;
+        for (java.lang.reflect.Constructor<?> c : igReqClass.getDeclaredConstructors()) {
+            if (c.getParameterTypes().length == 9) {
+                igCtor = c;
+                break;
+            }
+        }
+        if (igCtor == null) return null;
+        igCtor.setAccessible(true);
+        Class<?>[] pTypes = igCtor.getParameterTypes();
+        Class<?> bodyIface = pTypes[1];
+
+        Object bodyProxy = null;
+        if (isPost && form != null) {
+            StringBuilder sb = new StringBuilder();
+            for (Map.Entry<String, String> e : form.entrySet()) {
+                if (sb.length() > 0) sb.append('&');
+                sb.append(URLEncoder.encode(e.getKey(), "UTF-8"));
+                sb.append('=');
+                sb.append(URLEncoder.encode(e.getValue(), "UTF-8"));
+            }
+            final byte[] data = sb.toString().getBytes(StandardCharsets.UTF_8);
+            final Object contentTypeHdr = newHeader("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+            bodyProxy = java.lang.reflect.Proxy.newProxyInstance(
+                    bodyIface.getClassLoader(),
+                    new Class<?>[]{bodyIface},
+                    (proxy, m, args) -> {
+                        if (m.getReturnType() == InputStream.class) {
+                            return new java.io.ByteArrayInputStream(data);
+                        }
+                        if (m.getReturnType() == long.class) {
+                            return (long) data.length;
+                        }
+                        if (m.getReturnType() == headerClass) {
+                            return "Bup".equals(m.getName()) ? contentTypeHdr : null;
+                        }
+                        return null;
+                    });
+        }
+
+        java.util.List<Object> hdrs = new java.util.ArrayList<>();
+        hdrs.add(newHeader("Authorization", auth.bearer));
+        if (capturedMid != null && !capturedMid.isEmpty()) {
+            hdrs.add(newHeader("X-MID", capturedMid));
+        }
+        hdrs.add(newHeader("User-Agent", capturedHeaders.getOrDefault("User-Agent", userAgent())));
+        hdrs.add(newHeader("X-IG-App-ID", capturedHeaders.getOrDefault("X-IG-App-ID", IG_APP_ID)));
+        hdrs.add(newHeader("X-IG-Connection-Type", "WIFI"));
+        hdrs.add(newHeader("Accept-Language", capturedHeaders.getOrDefault("Accept-Language", "en-US")));
+        for (Map.Entry<String, String> h : capturedHeaders.entrySet()) {
+            String k = h.getKey();
+            if ("Authorization".equalsIgnoreCase(k) || "User-Agent".equalsIgnoreCase(k)
+                    || "X-IG-App-ID".equalsIgnoreCase(k) || "Accept-Language".equalsIgnoreCase(k)
+                    || "X-MID".equalsIgnoreCase(k) || "X-IG-Connection-Type".equalsIgnoreCase(k)) continue;
+            hdrs.add(newHeader(k, h.getValue()));
+        }
+
+        Object igReq = igCtor.newInstance(
+                null, bodyProxy, methodInt, urlStr, hdrs, new LinkedHashMap<>(),
+                Boolean.TRUE, Boolean.TRUE, Boolean.FALSE);
+        java.lang.reflect.Constructor<?> syncCtor =
+                syncReqClass.getDeclaredConstructor(igReqClass, capturedPolicy.getClass());
+        syncCtor.setAccessible(true);
+        Object syncReq = syncCtor.newInstance(igReq, capturedPolicy);
+
+        Object resp = syncSendMethod.invoke(null, syncReq);
+        if (resp == null) return null;
+
+        int statusCode = 0;
+        Object respBody = null;
+        for (java.lang.reflect.Field f : resp.getClass().getDeclaredFields()) {
+            if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+            f.setAccessible(true);
+            if (f.getType() == int.class) {
+                int v = f.getInt(resp);
+                if (v >= 100 && v <= 599 && statusCode == 0) statusCode = v;
+            } else if (f.getType().isInterface() && hasInputStreamMethod(f.getType())) {
+                respBody = f.get(resp);
+            }
+        }
+        String bodyStr = "";
+        if (respBody != null) {
+            java.lang.reflect.Method inMethod = null;
+            for (java.lang.reflect.Method m : respBody.getClass().getMethods()) {
+                if (m.getParameterTypes().length == 0 && m.getReturnType() == InputStream.class) {
+                    inMethod = m;
+                    break;
+                }
+            }
+            if (inMethod != null) {
+                try (InputStream is = (InputStream) inMethod.invoke(respBody)) {
+                    if (is != null) {
+                        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                        byte[] buf = new byte[8192];
+                        int n;
+                        while ((n = is.read(buf)) > 0) baos.write(buf, 0, n);
+                        bodyStr = new String(baos.toByteArray(), StandardCharsets.UTF_8);
+                    }
+                }
+            }
+        }
+        HttpResult out = new HttpResult();
+        out.code = statusCode > 0 ? statusCode : 200;
+        out.body = bodyStr;
+        return out;
     }
 
     private static String cleanUsername(String raw) {
