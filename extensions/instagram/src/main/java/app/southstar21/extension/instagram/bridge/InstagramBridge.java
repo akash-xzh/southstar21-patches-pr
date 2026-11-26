@@ -46,6 +46,8 @@ public final class InstagramBridge {
     private static volatile Context appContext;
     private static volatile String capturedBearer;
     private static volatile String capturedMid;
+    private static final java.util.concurrent.ConcurrentHashMap<String, String> capturedHeaders =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     private InstagramBridge() {}
 
@@ -53,8 +55,19 @@ public final class InstagramBridge {
         if (name == null || value == null || value.isEmpty()) return;
         if ("Authorization".equalsIgnoreCase(name)) {
             captureToken(value);
-        } else if ("X-MID".equalsIgnoreCase(name)) {
+            return;
+        }
+        if ("X-MID".equalsIgnoreCase(name)) {
             capturedMid = value;
+        }
+        String lower = name.toLowerCase(java.util.Locale.US);
+        if (lower.equals("user-agent")
+                || lower.startsWith("x-ig-")
+                || lower.startsWith("ig-")
+                || lower.startsWith("x-bloks-")
+                || lower.equals("accept-language")
+                || lower.equals("x-fb-connection-type")) {
+            capturedHeaders.put(name, value);
         }
     }
 
@@ -295,7 +308,8 @@ public final class InstagramBridge {
                 .put("pref_file", auth.prefFile)
                 .put("my_uid", auth.myUid)
                 .put("token_prefix", masked)
-                .put("ua", userAgent());
+                .put("captured_headers", capturedHeaders.size())
+                .put("ua", capturedHeaders.getOrDefault("User-Agent", userAgent()));
     }
 
     private static final class AccountLockedException extends Exception {
@@ -458,6 +472,12 @@ public final class InstagramBridge {
             return new JSONObject().put("ok", false).put("error", "missing media_id/shortcode/url");
         }
 
+        // Pre-fetch media info like opening the post/reel before liking
+        try {
+            request(auth, "GET", IG_API + "/media/" + mediaId + "/info/", null);
+        } catch (Throwable ignored) {}
+
+        boolean isReel = url.toLowerCase(java.util.Locale.US).contains("/reel");
         boolean wantLike = "1".equals(type);
         String actionPath = wantLike
                 ? "/media/" + mediaId + "/like/"
@@ -466,7 +486,7 @@ public final class InstagramBridge {
         form.put("media_id", mediaId);
         if (!auth.myUid.isEmpty()) form.put("_uid", auth.myUid);
         form.put("d", "0");
-        form.put("module_name", "feed_timeline");
+        form.put("module_name", isReel ? "clips_viewer_clips_tab" : "feed_timeline");
 
         HttpResult res = request(auth, "POST", IG_API + actionPath, form);
         JSONObject json = parseJson(res.body);
@@ -562,10 +582,16 @@ public final class InstagramBridge {
         if (capturedMid != null && !capturedMid.isEmpty()) {
             conn.setRequestProperty("X-MID", capturedMid);
         }
-        conn.setRequestProperty("User-Agent", userAgent());
-        conn.setRequestProperty("X-IG-App-ID", IG_APP_ID);
+        conn.setRequestProperty("User-Agent", capturedHeaders.getOrDefault("User-Agent", userAgent()));
+        conn.setRequestProperty("X-IG-App-ID", capturedHeaders.getOrDefault("X-IG-App-ID", IG_APP_ID));
         conn.setRequestProperty("X-IG-Connection-Type", "WIFI");
-        conn.setRequestProperty("Accept-Language", "en-US");
+        conn.setRequestProperty("Accept-Language", capturedHeaders.getOrDefault("Accept-Language", "en-US"));
+        for (Map.Entry<String, String> h : capturedHeaders.entrySet()) {
+            String k = h.getKey();
+            if ("Authorization".equalsIgnoreCase(k) || "User-Agent".equalsIgnoreCase(k)
+                    || "X-IG-App-ID".equalsIgnoreCase(k) || "Accept-Language".equalsIgnoreCase(k)) continue;
+            conn.setRequestProperty(k, h.getValue());
+        }
         if (form != null && "POST".equals(method)) {
             StringBuilder sb = new StringBuilder();
             for (Map.Entry<String, String> e : form.entrySet()) {

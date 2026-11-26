@@ -17,6 +17,10 @@ internal object HeaderAttachCallerFingerprint : Fingerprint(
     strings = listOf("Authorization", "X-MID"),
 )
 
+internal object CapabilitiesHeaderCallerFingerprint : Fingerprint(
+    strings = listOf("X-IG-Capabilities", "3brTv10C"),
+)
+
 @Suppress("unused")
 val instagramBridgePatch = bytecodePatch(
     name = "Instagram bridge (localhost)",
@@ -51,5 +55,27 @@ val instagramBridgePatch = bytecodePatch(
             0,
             "invoke-static { p1, p2 }, $BRIDGE_CLASS->captureHeader(Ljava/lang/String;Ljava/lang/String;)V",
         )
+
+        val capCaller = CapabilitiesHeaderCallerFingerprint.method
+        val addHeaderRef = capCaller.instructions
+            .asSequence()
+            .filter { it.opcode == Opcode.INVOKE_VIRTUAL }
+            .mapNotNull { (it as? ReferenceInstruction)?.reference as? MethodReference }
+            .firstOrNull {
+                it.returnType == "V" &&
+                    it.parameterTypes == listOf("Ljava/lang/String;", "Ljava/lang/String;")
+            }
+        if (addHeaderRef != null) {
+            val reqBuilderClass = mutableClassDefBy(addHeaderRef.definingClass)
+            val addHeaderMethod = reqBuilderClass.methods.first {
+                it.name == addHeaderRef.name &&
+                    it.parameterTypes == addHeaderRef.parameterTypes &&
+                    it.returnType == addHeaderRef.returnType
+            }
+            addHeaderMethod.addInstruction(
+                0,
+                "invoke-static { p1, p2 }, $BRIDGE_CLASS->captureHeader(Ljava/lang/String;Ljava/lang/String;)V",
+            )
+        }
     }
 }
