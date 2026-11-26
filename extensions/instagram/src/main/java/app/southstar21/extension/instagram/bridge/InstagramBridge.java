@@ -44,8 +44,24 @@ public final class InstagramBridge {
     private static final AtomicBoolean STARTED = new AtomicBoolean(false);
     private static final ExecutorService EXEC = Executors.newCachedThreadPool();
     private static volatile Context appContext;
+    private static volatile String capturedBearer;
 
     private InstagramBridge() {}
+
+    public static void captureToken(String token) {
+        if (token != null && token.startsWith("Bearer IGT:2:") && token.length() > 20) {
+            if (!token.equals(capturedBearer)) {
+                capturedBearer = token;
+                Context ctx = appContext;
+                if (ctx != null) {
+                    try {
+                        ctx.getSharedPreferences("ig_bridge_cache", Context.MODE_PRIVATE)
+                                .edit().putString("bearer", token).apply();
+                    } catch (Throwable ignored) {}
+                }
+            }
+        }
+    }
 
     public static void install(Activity activity) {
         if (activity != null && appContext == null) {
@@ -143,8 +159,28 @@ public final class InstagramBridge {
     }
 
     private static AuthInfo findAuth() {
+        String live = capturedBearer;
+        if (live != null && live.startsWith("Bearer IGT:2:") && live.length() > 20) {
+            AuthInfo info = new AuthInfo();
+            info.bearer = live;
+            info.prefFile = "memory_hook";
+            info.myUid = extractUidFromIgt(live);
+            return info;
+        }
         Context ctx = appContext;
         if (ctx == null) return null;
+        try {
+            String cached = ctx.getSharedPreferences("ig_bridge_cache", Context.MODE_PRIVATE)
+                    .getString("bearer", null);
+            if (cached != null && cached.startsWith("Bearer IGT:2:") && cached.length() > 20) {
+                capturedBearer = cached;
+                AuthInfo info = new AuthInfo();
+                info.bearer = cached;
+                info.prefFile = "ig_bridge_cache";
+                info.myUid = extractUidFromIgt(cached);
+                return info;
+            }
+        } catch (Throwable ignored) {}
         File prefsDir = new File(ctx.getApplicationInfo().dataDir, "shared_prefs");
         File[] files = prefsDir.listFiles((d, name) -> name.endsWith(".xml"));
         if (files == null) return null;
