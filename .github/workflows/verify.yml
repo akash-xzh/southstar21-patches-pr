@@ -1,0 +1,227 @@
+name: Verify patches
+
+# Patches every supported version of every app (Instagram, Spotify, YouTube Music) with the same Morphe Patcher
+# that Morphe Manager uses, and fails if any of that app's patches doesn't apply. Runs before each
+# release, and can be started by hand.
+#
+# The APKMs can't live in this public repo, so they're release assets of a private repo:
+#   repo:  vars.TEST_APKS_REPO (default southstar21dev/test-apks)
+#   tag:   <app>-<version> (instagram-456.1.0.56.78, spotify-9.2.0.2053, youtubemusic-9.46.51),
+#          holding each build of
+#          that version (one .apkm per version code, as builds of one version are obfuscated
+#          differently), named as APKMirror does: <package>_<version>-<version code>_....apkm
+#   token: secrets.TEST_APKS_TOKEN, a fine-grained token with read access to that repo's contents
+# Without the token the check is skipped with a warning, except on dev and main, where it fails:
+# nothing is released unverified.
+
+on:
+  workflow_call:
+    secrets:
+      TEST_APKS_TOKEN:
+        required: false
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  # Morphe CLI v2.2.0 runs morphe-patcher 2.4.0, the patcher in Morphe Manager 2.6.0.
+  # Keep this in step with the patcher Morphe Manager ships.
+  MORPHE_CLI_VERSION: v2.2.0
+  TEST_APKS_REPO: ${{ vars.TEST_APKS_REPO || 'southstar21dev/test-apks' }}
+  # Morphe Patches, for apps whose patches only build together with some of them (see APPS).
+  # Pinned, so a Morphe release can't break ours unnoticed; it needs the patcher above.
+  MORPHE_PATCHES_VERSION: v2.3.0
+  # Each app: <folder under patches/.../patches/>:<package name>:<display name>[:<Morphe Patches>],
+  # with _ for spaces. Its supported versions are read from that folder's shared/Constants.kt.
+  # The optional last part lists Morphe Patches (comma separated) applied along with ours, for
+  # apps whose patches stop the build without them: YouTube Music needs GmsCore support.
+  APPS: >-
+    instagram:com.instagram.android:Instagram
+    spotify:com.spotify.music:Spotify
+    youtubemusic:com.google.android.apps.youtube.music:YouTube_Music:GmsCore_support
+
+jobs:
+  verify:
+    name: Patch supported versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check for test APKs
+        id: apks
+        env:
+          TOKEN: ${{ secrets.TEST_APKS_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_REF_NAME" = "dev" ] || [ "$GITHUB_REF_NAME" = "main" ]; then
+            echo "::error title=Patches not verified::The TEST_APKS_TOKEN secret is missing, so the patches can't be verified and nothing is released from $GITHUB_REF_NAME."
+            exit 1
+          else
+            echo "::warning title=Patches not verified::Set the TEST_APKS_TOKEN secret to patch the supported app versions before each release."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.apks.outputs.available == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The CLI below has to run the patcher these patches are built for.
+      - name: Check the patcher version
+        if: steps.apks.outputs.available == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: .github/scripts/check_patcher_version.sh "$MORPHE_CLI_VERSION"
+
+      - name: Setup Java
+        if: steps.apks.outputs.available == 'true'
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      # Only dev and main write the cache; other branches read the one main wrote.
+      - name: Setup Gradle
+        if: steps.apks.outputs.available == 'true'
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/dev' }}
+
+      - name: Build patches
+        if: steps.apks.outputs.available == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Also writes patches-list.json, which names every patch.
+        run: ./gradlew generatePatchesList --no-daemon
+
+      - name: Download Morphe CLI
+        if: steps.apks.outputs.available == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "$MORPHE_CLI_VERSION" -R MorpheApp/morphe-cli -p '*-all.jar' -D "$RUNNER_TEMP/cli"
+          mv "$RUNNER_TEMP"/cli/*-all.jar "$RUNNER_TEMP/morphe-cli.jar"
+
+      - name: Download Morphe Patches
+        if: steps.apks.outputs.available == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "$MORPHE_PATCHES_VERSION" -R MorpheApp/morphe-patches -p 'patches-*.mpp' -D "$RUNNER_TEMP/morphe"
+          mv "$RUNNER_TEMP"/morphe/patches-*.mpp "$RUNNER_TEMP/morphe-patches.mpp"
+
+      - name: Download supported APKMs
+        if: steps.apks.outputs.available == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.TEST_APKS_TOKEN }}
+        run: |
+          for app in $APPS; do
+            IFS=: read -r folder _ label <<< "$app"
+            label=${label//_/ }
+            constants="patches/src/main/kotlin/app/southstar21/patches/$folder/shared/Constants.kt"
+            versions=$(grep -oE 'version = "[^"]+"' "$constants" | sed -E 's/version = "(.*)"/\1/')
+            if [ -z "$versions" ]; then
+              echo "::error::No supported $label versions found in $constants"
+              exit 1
+            fi
+            mkdir -p "$RUNNER_TEMP/apks/$folder"
+            for version in $versions; do
+              if ! gh release download "$folder-$version" -R "$TEST_APKS_REPO" -p '*.apkm' -D "$RUNNER_TEMP/apks/$folder"; then
+                echo "::error title=Missing APKM::Add $label $version as a release tagged $folder-$version in $TEST_APKS_REPO"
+                exit 1
+              fi
+            done
+          done
+          ls -laR "$RUNNER_TEMP/apks"
+
+      - name: Patch
+        if: steps.apks.outputs.available == 'true'
+        run: |
+          patches=
+          for file in patches/build/libs/patches-*.mpp; do
+            case "$file" in *-sources.mpp|*-javadoc.mpp) ;; *) patches=$file ;; esac
+          done
+          failed=0
+          {
+            echo "## Patch verification"
+            echo
+            echo "Morphe CLI $MORPHE_CLI_VERSION, $(basename "$patches")"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for app in $APPS; do
+            IFS=: read -r folder package label morphe <<< "$app"
+            label=${label//_/ }
+            # This app's patches, every one switched on, including ones that are off by default.
+            # (Two apps can have a patch of the same name; the CLI only applies the one made for
+            # the app it's patching.)
+            names=$(jq -r --arg p "$package" \
+              '[.patches[] | select(any(.compatiblePackages[]; .packageName == $p)) | .name] | unique | .[]' patches-list.json)
+            enable=()
+            while IFS= read -r name; do [ -n "$name" ] && enable+=(-e "$name"); done <<< "$names"
+            # Plus only the named Morphe Patches, for apps that need them.
+            if [ -n "$morphe" ]; then
+              enable+=(-p "$RUNNER_TEMP/morphe-patches.mpp" --exclusive)
+              IFS=, read -ra extra <<< "${morphe//_/ }"
+              for name in "${extra[@]}"; do enable+=(-e "$name"); done
+            fi
+            expected=$(printf '%s\n' "$names" | jq -R . | jq -s 'map(select(length > 0))')
+            total=$(echo "$expected" | jq 'length')
+
+            for apkm in "$RUNNER_TEMP/apks/$folder"/*.apkm; do
+              # APKMirror names: <package>_<version>-<version code>_..., shown as "<version> (<code>)".
+              name=$(basename "$apkm" .apkm)
+              code=$(echo "$name" | sed -E 's/^[^_]+_[^-]+-([0-9]+).*/\1/')
+              version="$(echo "$name" | sed -E 's/^[^_]+_([^-]+)-.*/\1/') ($code)"
+              result="$RUNNER_TEMP/result-$folder-$code.json"
+              echo "::group::$label $version"
+              java -jar "$RUNNER_TEMP/morphe-cli.jar" patch \
+                -p "$patches" \
+                "${enable[@]}" \
+                --continue-on-error \
+                -r "$result" \
+                -o "$RUNNER_TEMP/patched-$folder-$code.apk" \
+                -t "$RUNNER_TEMP/tmp-$folder-$code" \
+                "$apkm" || true
+              echo "::endgroup::"
+
+              {
+                echo
+                echo "### $label $version"
+                echo
+                echo "| Patch | Result |"
+                echo "|---|---|"
+              } >> "$GITHUB_STEP_SUMMARY"
+
+              if [ ! -f "$result" ]; then
+                echo "::error title=$label $version::The CLI wrote no result, see the log above"
+                echo "| | No result, see the log |" >> "$GITHUB_STEP_SUMMARY"
+                failed=1
+                continue
+              fi
+
+              jq -r '.appliedPatches[] | "| \(.) | ✅ Applied |"' "$result" >> "$GITHUB_STEP_SUMMARY"
+              jq -r '.failedPatches[] | "| \(.name) | ❌ \(.error | split("\n")[0] | gsub("\\|"; "\\\\|")) |"' "$result" >> "$GITHUB_STEP_SUMMARY"
+
+              jq -r '.failedPatches[] | "::error title=\(.name) failed on '"$label $version"'::\(.error | split("\n")[0])"' "$result"
+              if [ "$(jq -r '.success' "$result")" != "true" ] || [ "$(jq '.failedPatches | length' "$result")" != "0" ]; then
+                reason=$(jq -r '.failureReason // empty' "$result")
+                [ -n "$reason" ] && echo "::error title=$label $version::$reason"
+                failed=1
+              fi
+
+              # A patch of this app that was skipped is neither applied nor failed.
+              missing=$(jq -r --argjson expected "$expected" \
+                '$expected - .appliedPatches - [.failedPatches[].name] | .[]' "$result")
+              if [ -n "$missing" ]; then
+                while IFS= read -r name; do
+                  echo "| $name | ⚠️ Not applied |" >> "$GITHUB_STEP_SUMMARY"
+                  echo "::error title=$name skipped on $label $version::The patch was not applied"
+                done <<< "$missing"
+                failed=1
+              fi
+              echo "Applied $(jq '.appliedPatches | length' "$result") of $total patches on $label $version"
+            done
+          done
+
+          exit $failed
