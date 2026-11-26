@@ -129,6 +129,8 @@ public final class InstagramBridge {
                     respJson = new JSONObject().put("ok", true).put("bridge", "instagram");
                 } else if ("/auth_check".equals(path)) {
                     respJson = handleAuthCheck();
+                } else if ("/self_check".equals(path)) {
+                    respJson = handleSelfCheck();
                 } else if ("/profile".equals(path)) {
                     respJson = handleProfile(params);
                 } else if ("/follow".equals(path)) {
@@ -296,11 +298,72 @@ public final class InstagramBridge {
                 .put("ua", userAgent());
     }
 
+    private static final class AccountLockedException extends Exception {
+        final int httpCode;
+        final String raw;
+        AccountLockedException(int httpCode, String msg, String raw) {
+            super(msg);
+            this.httpCode = httpCode;
+            this.raw = raw;
+        }
+    }
+
+    private static boolean isLockedError(int code, JSONObject j, String body) {
+        String msg = j != null ? j.optString("message", "") : "";
+        String errType = j != null ? j.optString("error_type", "") : "";
+        String combined = (msg + " " + errType + " " + (body == null ? "" : body)).toLowerCase();
+        if (combined.contains("checkpoint_required")
+                || combined.contains("challenge_required")
+                || combined.contains("login_required")
+                || combined.contains("user_has_logged_out")
+                || combined.contains("consent_required")
+                || combined.contains("account_suspended")) {
+            return true;
+        }
+        return code == 401 || code == 403;
+    }
+
+    private static JSONObject lockedJson(int code, String msg, String raw) throws Exception {
+        return new JSONObject()
+                .put("ok", false)
+                .put("locked", true)
+                .put("http_code", code)
+                .put("error", msg == null || msg.isEmpty() ? "checkpoint_required" : msg)
+                .put("raw", truncate(raw, 300));
+    }
+
+    private static JSONObject handleSelfCheck() throws Exception {
+        AuthInfo auth = requireAuth();
+        HttpResult r = request(auth, "GET", IG_API + "/accounts/current_user/?edit=true", null);
+        JSONObject j = parseJson(r.body);
+        if (r.code >= 200 && r.code < 300 && j != null && "ok".equalsIgnoreCase(j.optString("status"))) {
+            JSONObject u = j.optJSONObject("user");
+            return new JSONObject()
+                    .put("ok", true)
+                    .put("locked", false)
+                    .put("my_uid", auth.myUid)
+                    .put("username", u != null ? u.optString("username", "") : "");
+        }
+        boolean locked = isLockedError(r.code, j, r.body);
+        String msg = j != null ? j.optString("message", "") : "";
+        return new JSONObject()
+                .put("ok", false)
+                .put("locked", locked)
+                .put("http_code", r.code)
+                .put("error", msg.isEmpty() ? ("http_" + r.code) : msg)
+                .put("raw", truncate(r.body, 300));
+    }
+
     private static JSONObject handleProfile(Map<String, String> params) throws Exception {
         AuthInfo auth = requireAuth();
         String uid = params.getOrDefault("uid", "").trim();
         String username = cleanUsername(params.getOrDefault("username", ""));
-        JSONObject user = resolveUser(auth, uid, username);
+        JSONObject user;
+        try {
+            user = resolveUser(auth, uid, username);
+        } catch (AccountLockedException ale) {
+            return lockedJson(ale.httpCode, ale.getMessage(), ale.raw);
+        }
         if (user == null) {
             return new JSONObject().put("ok", false).put("error", "user not found");
         }
@@ -322,7 +385,12 @@ public final class InstagramBridge {
         int verifyDelay = parseInt(params.get("verify_delay"), 2500);
 
         if (uid.isEmpty()) {
-            JSONObject user = resolveUser(auth, "", username);
+            JSONObject user;
+            try {
+                user = resolveUser(auth, "", username);
+            } catch (AccountLockedException ale) {
+                return lockedJson(ale.httpCode, ale.getMessage(), ale.raw);
+            }
             if (user == null) {
                 return new JSONObject().put("ok", false).put("error", "user not found");
             }
@@ -346,6 +414,9 @@ public final class InstagramBridge {
         JSONObject json = parseJson(res.body);
         String apiStatus = json != null ? json.optString("status", "") : "";
         if (res.code < 200 || res.code >= 300 || !"ok".equalsIgnoreCase(apiStatus)) {
+            if (isLockedError(res.code, json, res.body)) {
+                return lockedJson(res.code, json != null ? json.optString("message", "") : "", res.body);
+            }
             return new JSONObject()
                     .put("ok", false)
                     .put("reverted", false)
@@ -401,6 +472,9 @@ public final class InstagramBridge {
         JSONObject json = parseJson(res.body);
         String apiStatus = json != null ? json.optString("status", "") : "";
         if (res.code < 200 || res.code >= 300 || !"ok".equalsIgnoreCase(apiStatus)) {
+            if (isLockedError(res.code, json, res.body)) {
+                return lockedJson(res.code, json != null ? json.optString("message", "") : "", res.body);
+            }
             return new JSONObject()
                     .put("ok", false)
                     .put("reverted", false)
@@ -450,12 +524,18 @@ public final class InstagramBridge {
         if (!uid.isEmpty()) {
             HttpResult r = request(auth, "GET", IG_API + "/users/" + uid + "/info/", null);
             JSONObject j = parseJson(r.body);
+            if (isLockedError(r.code, j, r.body)) {
+                throw new AccountLockedException(r.code, j != null ? j.optString("message", "") : "", r.body);
+            }
             if (j != null && j.has("user")) return j.optJSONObject("user");
         }
         if (!username.isEmpty()) {
             HttpResult r = request(auth, "GET",
                     IG_API + "/users/" + URLEncoder.encode(username, "UTF-8") + "/usernameinfo/", null);
             JSONObject j = parseJson(r.body);
+            if (isLockedError(r.code, j, r.body)) {
+                throw new AccountLockedException(r.code, j != null ? j.optString("message", "") : "", r.body);
+            }
             if (j != null && j.has("user")) return j.optJSONObject("user");
         }
         return null;
