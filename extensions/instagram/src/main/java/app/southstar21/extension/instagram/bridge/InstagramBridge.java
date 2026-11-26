@@ -886,7 +886,8 @@ public final class InstagramBridge {
         HttpResult out = new HttpResult();
         out.code = statusCode > 0 ? statusCode : 200;
         out.body = bodyStr;
-        Log.i(TAG, "native " + method + " " + urlStr + " -> " + out.code + " len=" + bodyStr.length());
+        Log.i(TAG, "native " + method + " " + urlStr + " -> " + out.code + " len=" + bodyStr.length()
+                + " head=" + truncate(bodyStr, 120).replace('\n', ' '));
         return out;
     }
 
