@@ -157,28 +157,50 @@ public final class InstagramBridge {
             return a.getName().compareTo(b.getName());
         });
 
+        java.util.List<String> debugPrefs = new java.util.ArrayList<>();
         for (File f : files) {
             String prefName = f.getName().substring(0, f.getName().length() - 4);
             try {
                 SharedPreferences sp = ctx.getSharedPreferences(prefName, Context.MODE_PRIVATE);
                 Map<String, ?> all = sp.getAll();
+                if (prefName.toLowerCase().contains("auth") || prefName.toLowerCase().contains("session")) {
+                    debugPrefs.add(prefName + ":" + all.keySet());
+                }
                 for (Map.Entry<String, ?> e : all.entrySet()) {
                     Object v = e.getValue();
                     if (!(v instanceof String)) continue;
-                    String s = (String) v;
+                    String s = ((String) v).trim();
                     int idx = s.indexOf("IGT:2:");
-                    if (idx < 0) continue;
-                    String token = s.startsWith("Bearer ") ? s : ("Bearer " + s.substring(idx));
-                    AuthInfo info = new AuthInfo();
-                    info.bearer = token.trim();
-                    info.prefFile = prefName;
-                    info.myUid = extractUidFromIgt(info.bearer);
-                    return info;
+                    if (idx >= 0) {
+                        String token = s.startsWith("Bearer ") ? s : ("Bearer " + s.substring(idx));
+                        AuthInfo info = new AuthInfo();
+                        info.bearer = token.trim();
+                        info.prefFile = prefName + "#" + e.getKey();
+                        info.myUid = extractUidFromIgt(info.bearer);
+                        return info;
+                    }
+                    // Instagram often stores the raw Base64 JSON without the "Bearer IGT:2:" prefix
+                    if (s.startsWith("eyJ") && s.length() > 30) {
+                        try {
+                            byte[] decoded = Base64.decode(s, Base64.DEFAULT);
+                            String jsonStr = new String(decoded, StandardCharsets.UTF_8);
+                            if (jsonStr.contains("ds_user_id") || jsonStr.contains("sessionid")) {
+                                AuthInfo info = new AuthInfo();
+                                info.bearer = "Bearer IGT:2:" + s;
+                                info.prefFile = prefName + "#" + e.getKey();
+                                info.myUid = extractUidFromIgt(info.bearer);
+                                return info;
+                            }
+                        } catch (Throwable ignored) {}
+                    }
                 }
             } catch (Throwable ignored) {}
         }
+        lastDebugPrefs = debugPrefs.toString();
         return null;
     }
+
+    private static volatile String lastDebugPrefs = "";
 
     private static String extractUidFromIgt(String bearer) {
         try {
@@ -212,7 +234,10 @@ public final class InstagramBridge {
     private static JSONObject handleAuthCheck() throws Exception {
         AuthInfo auth = findAuth();
         if (auth == null) {
-            return new JSONObject().put("ok", false).put("error", "no IGT:2 token in shared_prefs");
+            return new JSONObject()
+                    .put("ok", false)
+                    .put("error", "no IGT:2 token in shared_prefs")
+                    .put("debug_prefs", lastDebugPrefs);
         }
         String masked = auth.bearer.length() > 24
                 ? auth.bearer.substring(0, 20) + "..."
