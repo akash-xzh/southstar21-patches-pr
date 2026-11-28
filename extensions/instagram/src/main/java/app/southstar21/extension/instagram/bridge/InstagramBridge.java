@@ -454,14 +454,14 @@ public final class InstagramBridge {
         String masked = auth.bearer.length() > 24
                 ? auth.bearer.substring(0, 20) + "..."
                 : "***";
-        boolean nativeReady = syncSendMethod != null && syncReqClass != null
+        boolean nativeReady = USE_NATIVE && syncSendMethod != null && syncReqClass != null
                 && igReqClass != null && capturedPolicy != null && headerClass != null;
         return new JSONObject()
                 .put("ok", true)
                 .put("pref_file", auth.prefFile)
                 .put("my_uid", auth.myUid)
                 .put("token_prefix", masked)
-                .put("transport", nativeReady ? "native_tigon" : "httpurlconnection_fallback")
+                .put("transport", nativeReady ? "native_tigon" : "httpurlconnection")
                 .put("has_get", capturedMethodGet != null)
                 .put("has_post", capturedMethodPost != null)
                 .put("captured_headers", capturedHeaders.size())
@@ -535,7 +535,7 @@ public final class InstagramBridge {
             return lockedJson(ale.httpCode, ale.getMessage(), ale.raw);
         }
         if (user == null) {
-            return new JSONObject().put("ok", false).put("error", "user not found");
+            return new JSONObject().put("ok", false).put("error", "user not found").put("lookup", lastLookup);
         }
         String pk = user.optString("pk", user.optString("id", ""));
         if (pk.isEmpty() && user.has("pk_id")) pk = user.optString("pk_id", "");
@@ -705,6 +705,7 @@ public final class InstagramBridge {
                 throw new AccountLockedException(r.code, j != null ? j.optString("message", "") : "", r.body);
             }
             if (j != null && j.has("user")) return j.optJSONObject("user");
+            lastLookup = "uid " + r.code + " " + truncate(r.body, 200);
         }
         if (!username.isEmpty()) {
             HttpResult r = request(auth, "GET",
@@ -714,9 +715,13 @@ public final class InstagramBridge {
                 throw new AccountLockedException(r.code, j != null ? j.optString("message", "") : "", r.body);
             }
             if (j != null && j.has("user")) return j.optJSONObject("user");
+            lastLookup = "user " + r.code + " " + truncate(r.body, 200);
         }
         return null;
     }
+
+    private static volatile String lastLookup = "";
+    private static final boolean USE_NATIVE = false;
 
     private static JSONObject friendshipShow(AuthInfo auth, String uid) throws Exception {
         if (uid == null || uid.isEmpty()) return null;
@@ -731,6 +736,17 @@ public final class InstagramBridge {
 
     private static HttpResult request(AuthInfo auth, String method, String urlStr, Map<String, String> form)
             throws Exception {
+        // native SyncHttpService always returns an empty body on 456.x, and calling it first
+        // doubled every request (triggering IG rate limits), so it is off by default.
+        if (USE_NATIVE && syncSendMethod != null && syncReqClass != null && igReqClass != null
+                && capturedPolicy != null && headerClass != null) {
+            try {
+                HttpResult nr = nativeRequest(auth, method, urlStr, form);
+                if (nr != null && nr.body != null && !nr.body.isEmpty()) return nr;
+            } catch (Throwable ex) {
+                Log.w(TAG, "native failed: " + ex.getMessage());
+            }
+        }
         HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
         conn.setRequestMethod(method);
         conn.setConnectTimeout(15000);
