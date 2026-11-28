@@ -600,7 +600,9 @@ public final class InstagramBridge {
         Map<String, String> form = new LinkedHashMap<>();
         form.put("user_id", uid);
         if (!auth.myUid.isEmpty()) form.put("_uid", auth.myUid);
+        form.put("radio_type", radioType());
         form.put("container_module", "profile");
+        if (wantFollow) form.put("include_follow_friction_check", "1");
 
         HttpResult res = request(auth, "POST", IG_API + actionPath, form);
         JSONObject json = parseJson(res.body);
@@ -656,15 +658,19 @@ public final class InstagramBridge {
         } catch (Throwable ignored) {}
 
         boolean isReel = url.toLowerCase(java.util.Locale.US).contains("/reel");
+        String module = isReel ? "clips_viewer_clips_tab" : "feed_timeline";
         boolean wantLike = "1".equals(type);
         String actionPath = wantLike
                 ? "/media/" + mediaId + "/like/"
                 : "/media/" + mediaId + "/unlike/";
         Map<String, String> form = new LinkedHashMap<>();
+        form.put("d", "0");
         form.put("media_id", mediaId);
         if (!auth.myUid.isEmpty()) form.put("_uid", auth.myUid);
-        form.put("d", "0");
-        form.put("module_name", isReel ? "clips_viewer_clips_tab" : "feed_timeline");
+        form.put("is_offline_request", "false");
+        form.put("module_name", module);
+        form.put("container_module", module);
+        form.put("radio_type", radioType());
 
         HttpResult res = request(auth, "POST", IG_API + actionPath, form);
         JSONObject json = parseJson(res.body);
@@ -733,8 +739,10 @@ public final class InstagramBridge {
         }
         if (!username.isEmpty()) {
             String enc = URLEncoder.encode(username, "UTF-8");
-            // 1. Primary: /users/search/ (less aggressively rate-limited than /usernameinfo/)
-            HttpResult sr = request(auth, "GET", IG_API + "/users/search/?q=" + enc + "&count=5", null);
+            // 1. Primary: /users/search/ matching real app LX/0Sxn;->A01 params
+            HttpResult sr = request(auth, "GET",
+                    IG_API + "/users/search/?q=" + enc + "&count=20&search_surface=top_search_page&return_unconnected_private=true",
+                    null);
             JSONObject sj = parseJson(sr.body);
             if (isLockedError(sr.code, sj, sr.body)) {
                 throw new AccountLockedException(sr.code, sj != null ? sj.optString("message", "") : "", sr.body);
@@ -787,9 +795,27 @@ public final class InstagramBridge {
     private static volatile String lastLookup = "";
     private static final boolean USE_NATIVE = false;
 
+    private static String radioType() {
+        try {
+            Context ctx = appContext;
+            if (ctx != null) {
+                android.net.ConnectivityManager cm =
+                        (android.net.ConnectivityManager) ctx.getSystemService(Context.CONNECTIVITY_SERVICE);
+                if (cm != null) {
+                    android.net.NetworkInfo ni = cm.getActiveNetworkInfo();
+                    if (ni != null && ni.getType() == android.net.ConnectivityManager.TYPE_MOBILE) {
+                        return "mobile-lte";
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        return "wifi-none";
+    }
+
     private static JSONObject friendshipShow(AuthInfo auth, String uid) throws Exception {
         if (uid == null || uid.isEmpty()) return null;
-        HttpResult r = request(auth, "GET", IG_API + "/friendships/show/" + uid + "/", null);
+        HttpResult r = request(auth, "GET",
+                IG_API + "/friendships/show/" + uid + "/?is_external_deeplink_profile_view=false", null);
         return parseJson(r.body);
     }
 
