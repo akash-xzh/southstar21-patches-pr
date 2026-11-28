@@ -478,6 +478,16 @@ public final class InstagramBridge {
         }
     }
 
+    private static final class RateLimitedException extends Exception {
+        final int httpCode;
+        final String raw;
+        RateLimitedException(int httpCode, String raw) {
+            super("rate_limited");
+            this.httpCode = httpCode;
+            this.raw = raw;
+        }
+    }
+
     private static boolean isLockedError(int code, JSONObject j, String body) {
         String msg = j != null ? j.optString("message", "") : "";
         String errType = j != null ? j.optString("error_type", "") : "";
@@ -533,6 +543,12 @@ public final class InstagramBridge {
             user = resolveUser(auth, uid, username);
         } catch (AccountLockedException ale) {
             return lockedJson(ale.httpCode, ale.getMessage(), ale.raw);
+        } catch (RateLimitedException rle) {
+            return new JSONObject()
+                    .put("ok", false)
+                    .put("http_code", rle.httpCode)
+                    .put("error", "rate_limited")
+                    .put("lookup", rle.raw);
         }
         if (user == null) {
             return new JSONObject().put("ok", false).put("error", "user not found").put("lookup", lastLookup);
@@ -560,9 +576,15 @@ public final class InstagramBridge {
                 user = resolveUser(auth, "", username);
             } catch (AccountLockedException ale) {
                 return lockedJson(ale.httpCode, ale.getMessage(), ale.raw);
+            } catch (RateLimitedException rle) {
+                return new JSONObject()
+                        .put("ok", false)
+                        .put("http_code", rle.httpCode)
+                        .put("error", "rate_limited")
+                        .put("lookup", rle.raw);
             }
             if (user == null) {
-                return new JSONObject().put("ok", false).put("error", "user not found");
+                return new JSONObject().put("ok", false).put("error", "user not found").put("lookup", lastLookup);
             }
             uid = user.optString("pk", user.optString("id", ""));
             if (uid.isEmpty() && user.has("pk_id")) uid = user.optString("pk_id", "");
@@ -698,6 +720,7 @@ public final class InstagramBridge {
     }
 
     private static JSONObject resolveUser(AuthInfo auth, String uid, String username) throws Exception {
+        boolean saw429 = false;
         if (!uid.isEmpty()) {
             HttpResult r = request(auth, "GET", IG_API + "/users/" + uid + "/info/", null);
             JSONObject j = parseJson(r.body);
@@ -705,17 +728,58 @@ public final class InstagramBridge {
                 throw new AccountLockedException(r.code, j != null ? j.optString("message", "") : "", r.body);
             }
             if (j != null && j.has("user")) return j.optJSONObject("user");
+            if (r.code == 429) saw429 = true;
             lastLookup = "uid " + r.code + " " + truncate(r.body, 200);
         }
         if (!username.isEmpty()) {
-            HttpResult r = request(auth, "GET",
-                    IG_API + "/users/" + URLEncoder.encode(username, "UTF-8") + "/usernameinfo/", null);
+            String enc = URLEncoder.encode(username, "UTF-8");
+            // 1. Primary: /users/search/ (less aggressively rate-limited than /usernameinfo/)
+            HttpResult sr = request(auth, "GET", IG_API + "/users/search/?q=" + enc + "&count=5", null);
+            JSONObject sj = parseJson(sr.body);
+            if (isLockedError(sr.code, sj, sr.body)) {
+                throw new AccountLockedException(sr.code, sj != null ? sj.optString("message", "") : "", sr.body);
+            }
+            if (sj != null && sj.has("users")) {
+                JSONArray arr = sj.optJSONArray("users");
+                if (arr != null) {
+                    for (int i = 0; i < arr.length(); i++) {
+                        JSONObject u = arr.optJSONObject(i);
+                        if (u != null && username.equalsIgnoreCase(u.optString("username", ""))) {
+                            return u;
+                        }
+                    }
+                }
+            }
+            if (sr.code == 429) saw429 = true;
+            lastLookup = "search " + sr.code + " " + truncate(sr.body, 180);
+
+            // 2. Fallback: /users/{username}/usernameinfo/
+            HttpResult r = request(auth, "GET", IG_API + "/users/" + enc + "/usernameinfo/", null);
             JSONObject j = parseJson(r.body);
             if (isLockedError(r.code, j, r.body)) {
                 throw new AccountLockedException(r.code, j != null ? j.optString("message", "") : "", r.body);
             }
             if (j != null && j.has("user")) return j.optJSONObject("user");
-            lastLookup = "user " + r.code + " " + truncate(r.body, 200);
+            if (r.code == 429) saw429 = true;
+            lastLookup = "user " + r.code + " " + truncate(r.body, 180);
+
+            // 3. Fallback: /users/web_profile_info/?username=
+            HttpResult wr = request(auth, "GET", IG_API + "/users/web_profile_info/?username=" + enc, null);
+            JSONObject wj = parseJson(wr.body);
+            if (isLockedError(wr.code, wj, wr.body)) {
+                throw new AccountLockedException(wr.code, wj != null ? wj.optString("message", "") : "", wr.body);
+            }
+            if (wj != null && wj.has("data")) {
+                JSONObject data = wj.optJSONObject("data");
+                if (data != null && data.has("user") && !data.isNull("user")) {
+                    return data.optJSONObject("user");
+                }
+            }
+            if (wr.code == 429) saw429 = true;
+            lastLookup = "web " + wr.code + " " + truncate(wr.body, 180);
+        }
+        if (saw429) {
+            throw new RateLimitedException(429, lastLookup);
         }
         return null;
     }

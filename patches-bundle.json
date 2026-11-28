@@ -1,8 +1,8 @@
 {
-  "created_at": "2026-11-28T12:30:00",
+  "created_at": "2026-11-28T12:48:00",
   "description": "Instagram bridge (localhost 48913 main / 48915 clone) for follow, post like, and reel like.",
-  "download_url": "https://github.com/akash-xzh/southstar21-patches-pr/releases/download/v1.4.13/patches-1.4.13.mpp",
+  "download_url": "https://github.com/akash-xzh/southstar21-patches-pr/releases/download/v1.4.14/patches-1.4.14.mpp",
   "signature_download_url": "",
-  "version": "1.4.13",
+  "version": "1.4.14",
   "public_key": "jUJZDs270StPJSIZ5KsoL1uPrFnrTGZMKgAtf/FxdQE="
 }
